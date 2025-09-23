@@ -1,4 +1,7 @@
+# testwizard/agents/coordinator.py
+
 import json
+import logging  
 from google.adk.agents import LlmAgent, SequentialAgent, LoopAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.tool_context import ToolContext
@@ -11,27 +14,52 @@ from .test_case_designer import test_case_designer_agent
 from .test_implementer import test_implementer_agent
 from .test_runner import test_runner_agent
 from .debugger_and_refiner import debugger_and_refiner_agent
-from tools.workflow_tools import exit_loop
+from ..tools.workflow_tools import exit_loop
 
 # --- State Initialization ---
 
-def initialize_state(callback_context: CallbackContext):
-    """Parses the initial user message and populates the session state."""
-    user_content = callback_context.user_content
-    if user_content and user_content.parts:
-        try:
-            initial_data = json.loads(user_content.parts[0].text)
-            callback_context.state['source_code'] = initial_data.get('source_code')
-            callback_context.state['language'] = initial_data.get('language')
-            # Initialize test_results to ensure the final agent doesn't fail
-            # if the loop is skipped or fails early.
-            callback_context.state['test_results'] = {"status": "UNKNOWN"}
-        except (json.JSONDecodeError, AttributeError):
-            print("Warning: Could not parse initial JSON request. Treating content as raw source code.")
-            callback_context.state['source_code'] = user_content.parts[0].text
-            callback_context.state['language'] = 'python'
-            callback_context.state['test_results'] = {"status": "UNKNOWN"}
+# Get a logger instance
+logger = logging.getLogger(__name__)
 
+def initialize_state(callback_context: CallbackContext):
+    """
+    Parses the initial user message to populate the session state.
+    Handles two input formats:
+    1. A JSON string with 'source_code' and 'language' keys (used by main.py).
+    2. Raw source code as a string (used when pasting code into the adk web UI).
+    """
+    user_content = callback_context.user_content
+    if not (user_content and user_content.parts and user_content.parts[0].text):
+        logger.error("Initialization failed: No text content found in the initial user message.")
+        callback_context.state['initialization_error'] = "No input content."
+        return
+
+    raw_text = user_content.parts[0].text
+    is_json_input = False
+    try:
+        # Attempt to parse the input as the structured JSON from main.py
+        initial_data = json.loads(raw_text)
+        if isinstance(initial_data, dict) and 'source_code' in initial_data:
+            callback_context.state['source_code'] = initial_data.get('source_code')
+            callback_context.state['language'] = initial_data.get('language', 'python')
+            logger.info("Initialized state from JSON input.")
+            is_json_input = True
+    except json.JSONDecodeError:
+        # If parsing fails, it's not JSON. We'll treat it as raw code.
+        pass
+
+    if not is_json_input:
+        # Fallback for raw code input from the web UI
+        logger.info("Input is not a recognized JSON format. Initializing state from raw text.")
+        callback_context.state['source_code'] = raw_text
+        callback_context.state['language'] = 'python' # Assume python for raw input
+
+    # Initialize other required state variables to prevent downstream errors.
+    callback_context.state['test_results'] = {"status": "NOT_RUN"}
+    callback_context.state['static_analysis_report'] = {}
+    callback_context.state['test_scenarios'] = []
+    callback_context.state['generated_test_code'] = ""
+    logger.info("State initialized successfully.")
 
 
 def save_analysis_to_state(tool: BaseTool, args: dict, tool_context: ToolContext, tool_response: dict):
@@ -54,11 +82,24 @@ def save_analysis_to_state(tool: BaseTool, args: dict, tool_context: ToolContext
 code_analyzer_agent.after_tool_callback = save_analysis_to_state
 
 # 2. TestCaseDesigner: Read from `static_analysis_report`, save to `test_scenarios`.
-test_case_designer_agent.instruction += "\n\nYou will receive the static analysis report in the `{static_analysis_report}` state variable."
+async def build_designer_instruction(ctx: CallbackContext) -> str:
+    """Dynamically creates the prompt for the test designer with the analysis report."""
+    report = ctx.state.get('static_analysis_report', {})
+    report_str = json.dumps(report, indent=2)
+    # The original instruction is already inside the agent, we just append the dynamic part.
+    return f"You will receive the static analysis report as a JSON object:\n\n{report_str}"
+
+test_case_designer_agent.instruction = build_designer_instruction
 test_case_designer_agent.output_key = "test_scenarios"
 
 # 3. TestImplementer: Read from `test_scenarios`, save to `generated_test_code`.
-test_implementer_agent.instruction += "\n\nYou will receive the test scenarios in the `{test_scenarios}` state variable."
+async def build_implementer_instruction(ctx: CallbackContext) -> str:
+    """Dynamically creates the prompt for the test implementer with the scenarios."""
+    scenarios = ctx.state.get('test_scenarios', [])
+    scenarios_str = json.dumps(scenarios, indent=2)
+    return f"You will receive the test scenarios as a JSON array:\n\n{scenarios_str}"
+
+test_implementer_agent.instruction = build_implementer_instruction
 test_implementer_agent.output_key = "generated_test_code"
 
 # 4. TestRunner: Read `source_code` & `generated_test_code`, save to `test_results`.

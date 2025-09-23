@@ -1,5 +1,5 @@
 from google.adk.agents import LlmAgent
-from tools.test_design_tools import generate_test_scenarios
+from ..tools.test_design_tools import generate_test_scenarios
 
 test_case_designer_agent = LlmAgent(
     name="TestCaseDesigner",

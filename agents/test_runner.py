@@ -1,5 +1,5 @@
 from google.adk.agents import LlmAgent
-from tools.test_execution_tools import execute_tests_sandboxed, parse_test_results
+from ..tools.test_execution_tools import execute_tests_sandboxed, parse_test_results
 
 test_runner_agent = LlmAgent(
     name="TestRunner",

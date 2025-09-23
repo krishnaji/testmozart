@@ -1,5 +1,5 @@
 from google.adk.agents import LlmAgent
-from tools.code_analysis_tools import analyze_code_structure
+from ..tools.code_analysis_tools import analyze_code_structure
 
 # This agent is highly specialized. Its instructions are very direct to prevent
 # the LLM from trying to analyze the code itself, which can lead to errors.
